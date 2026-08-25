@@ -74,33 +74,35 @@ namespace {
 
         void compose_variable_evolution(
             const GlobalVariable &global,
-            const Evolution &linear_evolution
+            const Evolution &after
         ) {
-            if (not variable_to_evolution.contains(&global)) {
-                variable_to_evolution[&global] = linear_evolution;
+            if (after.function_evolution_type == EvolutionType::Unknown) {
+                set_variable_unknown(global);
                 return;
             }
 
-            switch (linear_evolution.function_evolution_type) {
-                case EvolutionType::Linear: {
-                    const auto &before = variable_to_evolution[&global].function_linear_evolution;
-                    const auto &after = linear_evolution.function_linear_evolution;
-                    variable_to_evolution[&global] = {
-                        EvolutionType::Linear,
-                        {
-                            after.b + after.k * before.b,
-                            after.k * before.k
-                        }
-                    };
-                    break;
-                }
-                case EvolutionType::Unknown: {
-                    break;
-                }
-                default: {
-                    llvm_unreachable("unreachable");
-                }
+            const auto it = variable_to_evolution.find(&global);
+
+            if (it == variable_to_evolution.end()) {
+                variable_to_evolution[&global] = after;
+                return;
             }
+
+            const auto &before = it->second;
+
+            if (before.function_evolution_type == EvolutionType::Unknown)
+                return;
+
+            const auto &before_linear = before.function_linear_evolution;
+            const auto &after_linear = after.function_linear_evolution;
+
+            variable_to_evolution[&global] = {
+                EvolutionType::Linear,
+                {
+                    after_linear.b + after_linear.k * before_linear.b,
+                    after_linear.k * before_linear.k
+                }
+            };
         }
 
         void remember_load(
@@ -167,8 +169,8 @@ namespace {
 
             auto global_ptr = lhs->first ? lhs->first : rhs->first;
 
-            auto l_linear_ev = lhs->second.function_linear_evolution;
-            auto r_linear_ev = rhs->second.function_linear_evolution;
+            const auto &l_linear_ev = lhs->second.function_linear_evolution;
+            const auto &r_linear_ev = rhs->second.function_linear_evolution;
             switch (binary->getOpcode()) {
                 case Instruction::Add:
                     return std::pair{
@@ -289,7 +291,7 @@ namespace {
                         if (!global) continue;
                         if (!can_analyze_iv_global(*global)) continue;
 
-                        auto evolution = evaluate_linear_value(store->getValueOperand(), state);
+                        const auto evolution = evaluate_linear_value(store->getValueOperand(), state);
                         if (!evolution) {
                             state.set_variable_unknown(*global);
                             continue;
@@ -314,6 +316,128 @@ namespace {
             state.pop_function();
         }
 
+
+        std::optional<DenseMap<const GlobalVariable *, Evolution> > analyze_loop_iteration(
+            const Loop &loop,
+            const DenseMap<const Function *, DenseMap<const GlobalVariable *, Evolution> > &func_global_evolution,
+            const Module &module
+        ) {
+            if (!loop.isInnermost())
+                return std::nullopt;
+
+
+            FuncDfsState state;
+
+            const BasicBlock *header = loop.getHeader();
+            const BasicBlock *bb = header;
+
+            std::unordered_set<const BasicBlock *> visited;
+
+            while (true) {
+                if (!visited.insert(bb).second)
+                    return std::nullopt;
+
+                for (const auto &instr: *bb) {
+                    if (const auto *load = dyn_cast<LoadInst>(&instr)) {
+                        const auto *global = dyn_cast<GlobalVariable>(load->getPointerOperand());
+
+                        if (!global) continue;
+                        if (!can_analyze_iv_global(*global)) continue;
+
+                        state.remember_load(*load, *global);
+                    } else if (const auto *call = dyn_cast<CallBase>(&instr)) {
+                        const Function *callee = call->getCalledFunction();
+
+                        if (!callee) {
+                            set_all_globals_unknown(state, module);
+                            continue;
+                        }
+
+                        const auto func_it = func_global_evolution.find(callee);
+
+                        if (func_it == func_global_evolution.end()) {
+                            set_all_globals_unknown(state, module);
+                            continue;
+                        }
+
+                        for (const auto &[global, evolution]: func_it->second) {
+                            state.compose_variable_evolution(
+                                *global,
+                                evolution
+                            );
+                        }
+                    } else if (const auto *store = dyn_cast<StoreInst>(&instr)) {
+                        const auto *global = dyn_cast<GlobalVariable>(store->getPointerOperand());
+
+                        if (!global) continue;
+                        if (!can_analyze_iv_global(*global)) continue;
+
+                        auto evolution = evaluate_linear_value(store->getValueOperand(), state);
+
+                        if (!evolution) {
+                            state.set_variable_unknown(*global);
+                            continue;
+                        }
+
+                        if (evolution->first &&
+                            evolution->first != global) {
+                            state.set_variable_unknown(*global);
+                            continue;
+                        }
+
+                        state.set_variable_evolution(
+                            *global,
+                            evolution->second
+                        );
+                    }
+                }
+
+                const Instruction *terminator =
+                        bb->getTerminator();
+
+                SmallVector<const BasicBlock *, 2>
+                        successors_inside_loop;
+
+                for (unsigned i = 0;
+                     i < terminator->getNumSuccessors();
+                     ++i) {
+                    const BasicBlock *successor =
+                            terminator->getSuccessor(i);
+
+                    if (loop.contains(successor))
+                        successors_inside_loop.push_back(
+                            successor
+                        );
+                }
+
+                if (successors_inside_loop.size() != 1)
+                    return std::nullopt;
+
+                const BasicBlock *next =
+                        successors_inside_loop.front();
+
+                if (next == header)
+                    break;
+
+                bb = next;
+            }
+
+            DenseMap<const GlobalVariable *, Evolution> result;
+
+            for (const auto &global: module.globals()) {
+                if (!can_analyze_iv_global(global))
+                    continue;
+
+                if (const Evolution *evolution = state.get_variable_evolution(global)) {
+                    result[&global] = *evolution;
+                } else {
+                    result[&global] = {EvolutionType::Linear, {0, 1}};
+                }
+            }
+
+            return result;
+        }
+
         void print_info(
             const DenseMap<const Function *, DenseMap<const GlobalVariable *, Evolution> > &func_global_evolution
         ) {
@@ -335,7 +459,7 @@ namespace {
             }
         }
 
-        PreservedAnalyses run(Module &module, ModuleAnalysisManager &) {
+        PreservedAnalyses run(Module &module, ModuleAnalysisManager &mam) {
             DenseMap<const Function *, DenseMap<const GlobalVariable *, Evolution> > func_global_evolution;
 
             const auto &fs_it = module.functions();
@@ -364,6 +488,53 @@ namespace {
             }
 
             print_info(func_global_evolution);
+
+            auto &function_analysis_manager =
+                    mam
+                    .getResult<FunctionAnalysisManagerModuleProxy>(module)
+                    .getManager();
+
+            for (auto &function: module) {
+                if (function.isDeclaration())
+                    continue;
+
+                auto &loop_info = function_analysis_manager.getResult<LoopAnalysis>(function);
+
+                for (const auto loop: loop_info.getLoopsInPreorder()) {
+                    errs() << "Loop "
+                            << loop->getHeader()->getName()
+                            << ":\n";
+
+                    auto result = analyze_loop_iteration(
+                        *loop,
+                        func_global_evolution,
+                        module
+                    );
+
+                    if (!result) {
+                        errs() << "  unsupported\n";
+                        continue;
+                    }
+
+                    for (const auto &[global, evolution]: *result) {
+                        errs() << "  "
+                                << global->getName()
+                                << ": ";
+
+                        if (evolution.function_evolution_type ==
+                            EvolutionType::Unknown) {
+                            errs() << "unknown\n";
+                            continue;
+                        }
+
+                        const auto &[b, k] = evolution.function_linear_evolution;
+
+                        errs() << "b=" << b
+                                << ", k=" << k
+                                << "\n";
+                    }
+                }
+            }
 
             return PreservedAnalyses::all();
         }

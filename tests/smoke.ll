@@ -1,109 +1,206 @@
-@g = internal global i64 10
-@h = internal global i64 100
+@g = internal global i64 0
+@h = internal global i64 10
 
-; g -> g + 2
-define void @inc_g() {
+
+; ============================================================
+; Helper function.
+; Effect:
+;   g -> g + 2
+; ============================================================
+
+define void @add2() {
 entry:
   %x = load i64, ptr @g
-  %y = add i64 %x, 2
-  store i64 %y, ptr @g
+  %next = add i64 %x, 2
+  store i64 %next, ptr @g
   ret void
 }
 
-; g -> 3 * g
-define void @triple_g() {
-entry:
-  %x = load i64, ptr @g
-  %y = mul i64 %x, 3
-  store i64 %y, ptr @g
-  ret void
-}
 
-; h -> h - 5
-define void @dec_h() {
-entry:
-  %x = load i64, ptr @h
-  %y = sub i64 %x, 5
-  store i64 %y, ptr @h
-  ret void
-}
-
-; Интересный случай:
+; ============================================================
+; TEST 1
 ;
-; g:
-;   x
-;   -> x + 2
-;   -> 3(x + 2)
-;   -> 3x + 6
+; Самый простой loop: один BasicBlock.
 ;
-; Итоговый эффект должен стать:
-; g -> 6 + 3*x
-define void @update_g() {
+; Одна итерация:
+;   g -> g + 5
+;
+; Ожидаемый путь одной итерации:
+;   loop.simple -> loop.simple
+;
+; Но второй header твоя функция печатать НЕ должна.
+; ============================================================
+
+define void @simple_loop(i64 %n) {
 entry:
-  call void @inc_g()
-  call void @triple_g()
+  br label %loop.simple
+
+loop.simple:
+  %i = phi i64 [ 0, %entry ], [ %i.next, %loop.simple ]
+
+  %g.old = load i64, ptr @g
+  %g.next = add i64 %g.old, 5
+  store i64 %g.next, ptr @g
+
+  %i.next = add i64 %i, 1
+  %continue = icmp slt i64 %i.next, %n
+
+  br i1 %continue,
+     label %loop.simple,
+     label %exit
+
+exit:
   ret void
 }
 
-; Два вызова одной функции:
+
+; ============================================================
+; TEST 2
 ;
-; g -> g + 4
-define void @inc_twice() {
+; Loop состоит из нескольких BasicBlock:
+;
+;       header
+;        /   \
+;      body  exit
+;       |
+;      latch
+;       |
+;       +----> header
+;
+; Одна итерация изменяет:
+;   h -> h - 3
+;
+; Ожидаемый обход:
+;   loop.header
+;   loop.body
+;   loop.latch
+; ============================================================
+
+define void @multi_block_loop(i64 %n) {
 entry:
-  call void @inc_g()
-  call void @inc_g()
+  br label %loop.header
+
+loop.header:
+  %i = phi i64 [ 0, %entry ], [ %i.next, %loop.latch ]
+
+  %continue = icmp slt i64 %i, %n
+
+  br i1 %continue,
+     label %loop.body,
+     label %exit
+
+loop.body:
+  %h.old = load i64, ptr @h
+  %h.next = sub i64 %h.old, 3
+  store i64 %h.next, ptr @h
+
+  br label %loop.latch
+
+loop.latch:
+  %i.next = add i64 %i, 1
+  br label %loop.header
+
+exit:
   ret void
 }
 
-; Работает сразу с двумя globals:
+
+; ============================================================
+; TEST 3
 ;
-; g -> g + 2
-; h -> h - 5
-define void @update_both() {
+; Вызов функции внутри loop.
+;
+; add2:
+;   g -> g + 2
+;
+; После вызова:
+;   g -> g + 3
+;
+; Итого за одну итерацию:
+;   g -> g + 5
+;
+; Это пригодится, когда начнём применять function summaries
+; внутри loop.
+; ============================================================
+
+define void @loop_with_call(i64 %n) {
 entry:
-  call void @inc_g()
-  call void @dec_h()
+  br label %loop.call
+
+loop.call:
+  %i = phi i64 [ 0, %entry ], [ %i.next, %loop.call ]
+
+  call void @add2()
+
+  %g.old = load i64, ptr @g
+  %g.next = add i64 %g.old, 3
+  store i64 %g.next, ptr @g
+
+  %i.next = add i64 %i, 1
+  %continue = icmp slt i64 %i.next, %n
+
+  br i1 %continue,
+     label %loop.call,
+     label %exit
+
+exit:
   ret void
 }
 
-; Прямой store + вызов.
+
+; ============================================================
+; TEST 4
 ;
-; В идеале:
-;   g -> g + 10
-;   затем inc_g
-;   g -> g + 12
+; Намеренно неподдерживаемый пока случай.
 ;
-; Этот случай станет интересным,
-; когда начнём учитывать порядок store/call.
-define void @direct_and_call() {
-entry:
-  %x = load i64, ptr @g
-  %y = add i64 %x, 10
-  store i64 %y, ptr @g
+; Внутри loop есть развилка:
+;
+;              /-> left  --\
+;   header ---               --> latch --> header
+;              \-> right --/
+;
+; У header ДВА successor'а внутри loop.
+;
+; Твой текущий алгоритм должен вывести:
+;   unsupported
+;
+; НЕЛЬЗЯ последовательно сложить эффекты left и right,
+; потому что за одну итерацию выполняется только одна ветка.
+; ============================================================
 
-  call void @inc_g()
+define void @branch_inside_loop(i1 %flag, i64 %n) {
+entry:
+  br label %loop.branch
+
+loop.branch:
+  %i = phi i64 [ 0, %entry ], [ %i.next, %loop.latch ]
+
+  br i1 %flag,
+     label %loop.left,
+     label %loop.right
+
+loop.left:
+  %g.left.old = load i64, ptr @g
+  %g.left.next = add i64 %g.left.old, 1
+  store i64 %g.left.next, ptr @g
+
+  br label %loop.latch
+
+loop.right:
+  %g.right.old = load i64, ptr @g
+  %g.right.next = add i64 %g.right.old, 2
+  store i64 %g.right.next, ptr @g
+
+  br label %loop.latch
+
+loop.latch:
+  %i.next = add i64 %i, 1
+  %continue = icmp slt i64 %i.next, %n
+
+  br i1 %continue,
+     label %loop.branch,
+     label %exit
+
+exit:
   ret void
-}
-
-; ДВА store в одну global.
-; Твой текущий анализ должен считать это Unknown.
-define void @two_stores() {
-entry:
-  %x = load i64, ptr @g
-  %a = add i64 %x, 1
-  store i64 %a, ptr @g
-
-  %y = load i64, ptr @g
-  %b = add i64 %y, 1
-  store i64 %b, ptr @g
-
-  ret void
-}
-
-define i32 @main() {
-entry:
-  call void @update_g()
-  call void @inc_twice()
-  call void @update_both()
-  ret i32 0
 }
