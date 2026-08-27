@@ -19,6 +19,11 @@ namespace {
         DenseMap<const Function *, SmallVector<const StoreInst *> > stores;
     };
 
+    struct GlobalAccessSummary {
+        bool reads = false;
+        bool writes = false;
+    };
+
     enum class EvolutionType {
         Unknown,
         Linear
@@ -172,6 +177,154 @@ namespace {
         bool can_analyze_iv_global(const GlobalVariable &global) {
             return global.getValueType()->isIntegerTy()
                    and canTrackGlobalVariableInterprocedurally(const_cast<GlobalVariable *>(&global));
+        }
+
+        using FunctionGlobalAccessSummary =
+        DenseMap<
+            const Function *,
+            DenseMap<const GlobalVariable *, GlobalAccessSummary>
+        >;
+
+        using GlobalAccessMap =
+        DenseMap<const GlobalVariable *, GlobalAccesses>;
+
+        FunctionGlobalAccessSummary build_direct_access_summary(
+            const GlobalAccessMap &global_accesses
+        ) {
+            FunctionGlobalAccessSummary result;
+
+            for (const auto &[global, accesses]: global_accesses) {
+                for (const auto &[function, loads]: accesses.loads) {
+                    if (!loads.empty())
+                        result[function][global].reads = true;
+                }
+
+                for (const auto &[function, stores]: accesses.stores) {
+                    if (!stores.empty())
+                        result[function][global].writes = true;
+                }
+            }
+
+            return result;
+        }
+
+
+        bool merge_access_summary(
+            GlobalAccessSummary &dst,
+            const GlobalAccessSummary &src
+        ) {
+            const bool old_reads = dst.reads;
+            const bool old_writes = dst.writes;
+
+            dst.reads |= src.reads;
+            dst.writes |= src.writes;
+
+            return old_reads != dst.reads ||
+                   old_writes != dst.writes;
+        }
+
+        FunctionGlobalAccessSummary build_transitive_access_summary(
+            const Module &module,
+            const FunctionGlobalAccessSummary &direct_summary,
+            const ArrayRef<const GlobalVariable *> &globals
+        ) {
+            FunctionGlobalAccessSummary result = direct_summary;
+
+            bool changed;
+
+            do {
+                changed = false;
+
+                for (const Function &caller: module) {
+                    if (caller.isDeclaration())
+                        continue;
+
+                    for (const Instruction &instruction:
+                         instructions(caller)) {
+                        const auto *call = dyn_cast<CallBase>(&instruction);
+
+                        if (!call)
+                            continue;
+
+                        const Function *callee = call->getCalledFunction();
+
+                        if (!callee || callee->isDeclaration()) {
+                            for (const GlobalVariable *global: globals) {
+                                auto &summary = result[&caller][global];
+
+                                changed |= merge_access_summary(
+                                    summary,
+                                    {.reads = true, .writes = true}
+                                );
+                            }
+
+                            continue;
+                        }
+
+                        const auto callee_it = result.find(callee);
+
+                        if (callee_it == result.end())
+                            continue;
+
+                        for (const auto &[global, callee_summary]: callee_it->second) {
+                            changed |= merge_access_summary(
+                                result[&caller][global],
+                                callee_summary
+                            );
+                        }
+                    }
+                }
+            } while (changed);
+
+            return result;
+        }
+
+        bool loop_has_interfering_call(
+            const GlobalEvolutionCandidate &candidate,
+            const FunctionGlobalAccessSummary &summary
+        ) {
+            for (const BasicBlock *block: candidate.loop->blocks()) {
+                for (const Instruction &instruction: *block) {
+                    const auto *call = dyn_cast<CallBase>(&instruction);
+                    if (!call) continue;
+
+                    const Function *callee = call->getCalledFunction();
+
+                    if (!callee || callee->isDeclaration())
+                        return true;
+
+                    const auto function_it = summary.find(callee);
+
+                    if (function_it == summary.end())
+                        continue;
+
+                    const auto global_it = function_it->second.find(candidate.global);
+
+                    if (global_it == function_it->second.end())
+                        continue;
+
+                    if (global_it->second.reads or global_it->second.writes)
+                        return true;
+                }
+            }
+
+            return false;
+        }
+
+        bool loop_has_may_throw_call(
+            const Loop &loop
+        ) {
+            for (const BasicBlock *block: loop.blocks()) {
+                for (const Instruction &instruction: *block) {
+                    const auto *call = dyn_cast<CallBase>(&instruction);
+                    if (!call) continue;
+
+                    if (call->mayThrow())
+                        return true;
+                }
+            }
+
+            return false;
         }
 
         std::optional<std::pair<const GlobalVariable *, Evolution> > evaluate_linear_value(
@@ -355,6 +508,32 @@ namespace {
             state.pop_function();
         }
 
+        bool global_has_atomic_access(
+            const GlobalVariable &global,
+            const GlobalAccessMap &global_accesses
+        ) {
+            const auto global_it = global_accesses.find(&global);
+
+            if (global_it == global_accesses.end())
+                return false;
+
+            for (const auto &[_, loads]: global_it->second.loads) {
+                for (const LoadInst *load: loads) {
+                    if (load->isAtomic())
+                        return true;
+                }
+            }
+
+            for (const auto &[_, stores]: global_it->second.stores) {
+                for (const StoreInst *store: stores) {
+                    if (store->isAtomic())
+                        return true;
+                }
+            }
+
+            return false;
+        }
+
 
         std::optional<DenseMap<const GlobalVariable *, Evolution> > analyze_loop_iteration(
             const Loop &loop,
@@ -498,20 +677,41 @@ namespace {
             }
         }
 
-        PreservedAnalyses run(Module &module, ModuleAnalysisManager &mam) {
-            const auto &global_accesses = collect_global_accesses(module);
+        bool loop_writes_global(
+            const GlobalEvolutionCandidate &candidate,
+            const GlobalAccessMap &global_accesses
+        ) {
+            const auto global_it =
+                    global_accesses.find(candidate.global);
 
+            if (global_it == global_accesses.end())
+                return false;
 
-            for (const auto &[global, accesses]: global_accesses) {
-                errs() << global->getName() << ":\n";
-
-                for (const auto &[function, loads]: accesses.loads)
-                    errs() << "  " << function->getName() << " loads=" << loads.size() << "\n";
-
-                for (const auto &[function, stores]: accesses.stores)
-                    errs() << "  " << function->getName() << " stores=" << stores.size() << "\n";
+            for (const auto &[function, stores]:
+                 global_it->second.stores) {
+                for (const StoreInst *store: stores) {
+                    if (candidate.loop->contains(store))
+                        return true;
+                }
             }
 
+            return false;
+        }
+
+        PreservedAnalyses run(Module &module, ModuleAnalysisManager &mam) {
+            const auto global_accesses = collect_global_accesses(module);
+
+            SmallVector<const GlobalVariable *> tracked_globals;
+            tracked_globals.reserve(global_accesses.size());
+
+            for (const auto &[global, _]: global_accesses)
+                tracked_globals.push_back(global);
+
+            const auto direct_access_summary = build_direct_access_summary(global_accesses);
+
+            const auto transitive_access_summary = build_transitive_access_summary(
+                module, direct_access_summary, tracked_globals
+            );
 
             DenseMap<const Function *, DenseMap<const GlobalVariable *, Evolution> > func_global_evolution;
 
@@ -574,16 +774,47 @@ namespace {
                                 << global->getName()
                                 << ": ";
 
-                        if (evolution.function_evolution_type ==
-                            EvolutionType::Unknown) {
+                        if (evolution.function_evolution_type == EvolutionType::Unknown) {
                             errs() << "unknown\n";
                             continue;
                         }
+
+                        GlobalEvolutionCandidate candidate{loop, global, evolution};
+                        if (!loop_writes_global(candidate, global_accesses))
+                            continue;
+
+                        const bool has_interfering_call = loop_has_interfering_call(
+                            candidate, transitive_access_summary
+                        );
+
+                        const bool has_may_throw_call = loop_has_may_throw_call(*candidate.loop);
+
+                        const bool has_atomic_access = global_has_atomic_access(*candidate.global, global_accesses);
+
+                        const BasicBlock *preheader = candidate.loop->getLoopPreheader();
+
+                        const BasicBlock *exit_block = candidate.loop->getUniqueExitBlock();
+
+                        const bool has_dedicated_exits = candidate.loop->hasDedicatedExits();
+
+                        const bool has_usable_exit = exit_block && has_dedicated_exits;
 
                         const auto &[b, k] = evolution.function_linear_evolution;
 
                         errs() << "b=" << b
                                 << ", k=" << k
+                                << ", interfering-call="
+                                << (has_interfering_call ? "yes" : "no")
+                                << ", may-throw-call="
+                                << (has_may_throw_call ? "yes" : "no")
+                                << ", atomic-access="
+                                << (has_atomic_access ? "yes" : "no")
+                                << ", preheader="
+                                << (preheader ? "yes" : "no")
+                                << ", unique-exit="
+                                << (exit_block ? "yes" : "no")
+                                << ", dedicated-exits="
+                                << (has_dedicated_exits ? "yes" : "no")
                                 << "\n";
                     }
                 }
