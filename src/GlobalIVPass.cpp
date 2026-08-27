@@ -35,6 +35,12 @@ namespace {
         LinearEvolution function_linear_evolution;
     };
 
+    struct GlobalEvolutionCandidate {
+        const Loop *loop;
+        const GlobalVariable *global;
+        Evolution evolution;
+    };
+
     class FuncDfsState {
         std::multiset<const Function *> analyzing_functions_multiset;
         SmallVector<const Function *> analyzing_functions_stack;
@@ -130,6 +136,39 @@ namespace {
 
 
     class GlobalIVPass : public PassInfoMixin<GlobalIVPass> {
+        DenseMap<const GlobalVariable *, GlobalAccesses> collect_global_accesses(Module &module) {
+            DenseMap<const GlobalVariable *, GlobalAccesses> result;
+
+            for (auto &global: module.globals()) {
+                if (!can_analyze_iv_global(global))
+                    continue;
+
+                auto &accesses = result[&global];
+
+                for (User *user: global.users()) {
+                    if (const auto *load = dyn_cast<LoadInst>(user)) {
+                        const Function *function = load->getFunction();
+
+                        accesses.loads[function].push_back(load);
+                        continue;
+                    }
+
+                    if (const auto *store = dyn_cast<StoreInst>(user)) {
+                        const Function *function = store->getFunction();
+
+                        accesses.stores[function].push_back(store);
+                        continue;
+                    }
+
+                    llvm_unreachable(
+                        "canTrackGlobalVariableInterprocedurally guaranteed load/store-only users"
+                    );
+                }
+            }
+
+            return result;
+        }
+
         bool can_analyze_iv_global(const GlobalVariable &global) {
             return global.getValueType()->isIntegerTy()
                    and canTrackGlobalVariableInterprocedurally(const_cast<GlobalVariable *>(&global));
@@ -460,6 +499,20 @@ namespace {
         }
 
         PreservedAnalyses run(Module &module, ModuleAnalysisManager &mam) {
+            const auto &global_accesses = collect_global_accesses(module);
+
+
+            for (const auto &[global, accesses]: global_accesses) {
+                errs() << global->getName() << ":\n";
+
+                for (const auto &[function, loads]: accesses.loads)
+                    errs() << "  " << function->getName() << " loads=" << loads.size() << "\n";
+
+                for (const auto &[function, stores]: accesses.stores)
+                    errs() << "  " << function->getName() << " stores=" << stores.size() << "\n";
+            }
+
+
             DenseMap<const Function *, DenseMap<const GlobalVariable *, Evolution> > func_global_evolution;
 
             const auto &fs_it = module.functions();
