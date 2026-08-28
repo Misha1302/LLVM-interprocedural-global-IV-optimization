@@ -1,33 +1,70 @@
-# Prerequisites
-*.d
+# Build trees
+/build/
+/build-*/
+/cmake-build-*/
 
-# Compiled Object files
-*.slo
-*.lo
+# Accidental in-source CMake/Ninja output
+/CMakeCache.txt
+/CMakeFiles/
+/cmake_install.cmake
+/install_manifest.txt
+/CTestTestfile.cmake
+/Testing/
+/compile_commands.json
+/build.ninja
+/rules.ninja
+/.ninja_deps
+/.ninja_log
+
+# Local CMake configuration
+/CMakeUserPresets.json
+
+# C/C++ build artifacts
 *.o
 *.obj
-
-# Precompiled Headers
-*.gch
-*.pch
-
-# Compiled Dynamic libraries
-*.so
-*.dylib
-*.dll
-
-# Fortran module files
-*.mod
-*.smod
-
-# Compiled Static libraries
-*.lai
-*.la
+*.lo
 *.a
 *.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.d
 
-# Executables
-*.exe
-*.out
-*.app
-/.idea
+# Regression runner output
+/tests/last-output/
+
+# Python tooling
+__pycache__/
+*.py[cod]
+.venv/
+
+# Profiling / coverage output
+*.profraw
+*.profdata
+*.gcda
+*.gcno
+*.gcov
+
+# Crash dumps
+/core
+/core.*
+*.stackdump
+
+# IDE / editor state
+/.idea/
+*.iml
+/.vscode/
+/.cache/clangd/
+*.swp
+*.swo
+*~
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Keep source LLVM IR tests tracked.
+# Do NOT add a global *.ll rule.
+
+/tests/last-output/
