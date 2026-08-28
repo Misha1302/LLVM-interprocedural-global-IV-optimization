@@ -1,7 +1,6 @@
 #pragma once
 
 #include "ModuleEffects.h"
-#include "ModuleEffects.h"
 #include "PromotionLegality.h"
 
 #include "llvm/Support/Alignment.h"

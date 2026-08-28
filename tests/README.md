@@ -1,14 +1,10 @@
-# GlobalIVPass regression suite v3
+# GlobalIVPass regression suite v4
 
-This suite contains exactly 29 LLVM IR cases. `run_regressions.py` refuses to run if the directory is stale or mixed with an older suite.
+The regression suite contains exactly 29 LLVM IR cases. `run_regressions.py` checks the case set before running, so a stale or mixed test directory fails immediately instead of silently producing misleading results.
 
-Key corrections from v2:
-- `03_overwrite_before_read.ll` is the affine-domain overwrite-before-read case (`store 10; load; +1; store`).
-- the old loop-IV-dependent version is retained separately as `28_loop_iv_dependent_reject.ll`.
-- case 22 is correctly classified as supported: preheader initialization makes an early exit before the first body store semantics-preserving.
-- case 22 now has an executable wrapper and participates in differential execution.
+The suite covers both transformations that should succeed and cases that must be rejected conservatively.
 
-Run:
+## Run
 
 ```bash
 python3 run_regressions.py \
@@ -17,11 +13,37 @@ python3 run_regressions.py \
   --keep-output
 ```
 
-Expected preamble:
+The expected preamble is:
 
 ```text
 suite=v4-2026-08-28 cases=29
 ```
 
+A fully successful run ends with:
 
-Runner v4 canonicalizes the non-semantic `; ModuleID = ...` line before the second-pass idempotence comparison.
+```text
+passed=29 failed=0
+```
+
+## What the runner checks
+
+For every case, the runner invokes `opt` with `global-iv,verify`. It then performs structural checks on the resulting IR.
+
+The transformed IR is passed through the optimization a second time as well. After removing the non-semantic `; ModuleID = ...` line, the first and second results must match exactly. This makes repeated localization and other non-idempotent transformations visible.
+
+For executable cases, and when `clang` is available, the runner also compiles and executes both the original and transformed modules and compares their observable results.
+
+## Notable cases
+
+- `03_overwrite_before_read.ll` covers an affine overwrite-before-read path (`store 10; load; +1; store`) and must not initialize the local slot unnecessarily.
+- `18_addrspace_counterexample.ll` checks that a global in an unsupported address space is rejected.
+- `19_underaligned_counterexample.ll` checks that generated global accesses do not strengthen alignment assumptions.
+- `20_returns_twice_probe.ll` guards the `returns_twice` corner case.
+- `22_early_exit_before_store_supported.ll` verifies that preheader initialization makes an early exit before the first body store safe.
+- `23_call_write_before_store_needs_init.ll` checks synchronization around a write-capable call before the first direct store.
+- `24_overwrite_before_read_call_no_init.ll` checks that a guaranteed overwrite can still avoid preheader initialization before a read-only call.
+- `25_non_linear_square_reject.ll` and `26_cross_global_dependency_reject.ll` exercise unsupported value evolution.
+- `28_loop_iv_dependent_reject.ll` keeps the loop-IV-dependent case separate from the affine overwrite test.
+- `29_initialized_early_exit_supported.ll` covers the corresponding initialized early-exit path.
+
+`--keep-output` copies the transformed files to `tests/last-output/` for manual inspection. That directory is generated output and should remain untracked.
