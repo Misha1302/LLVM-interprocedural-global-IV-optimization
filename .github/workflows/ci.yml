@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test-format:
+    name: LLVM 22 · build, regressions, format
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    env:
+      LLVM_ROOT: /usr/lib/llvm-22
+      LLVM_CONFIG: /usr/bin/llvm-config-22
+      CLANG_FORMAT: /usr/bin/clang-format-22
+      CLANG_TIDY: /usr/bin/clang-tidy-22
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install LLVM 22 toolchain
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ca-certificates wget gnupg
+          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x /tmp/llvm.sh
+          sudo /tmp/llvm.sh 22
+          sudo apt-get install -y --no-install-recommends \
+            llvm-22-dev \
+            clang-22 \
+            clang-format-22 \
+            clang-tidy-22
+          echo "/usr/lib/llvm-22/bin" >> "$GITHUB_PATH"
+
+      - name: Verify toolchain
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test "$("$LLVM_CONFIG" --version | cut -d. -f1)" = "22"
+          "$LLVM_CONFIG" --version
+          "$LLVM_ROOT/bin/opt" --version
+          "$LLVM_ROOT/bin/clang" --version
+          "$CLANG_FORMAT" --version
+          "$CLANG_TIDY" --version
+
+      - name: Configure
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cmake \
+            -S . \
+            -B build \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -DLLVM_CONFIG="$LLVM_CONFIG"
+
+      - name: Build
+        run: cmake --build build --parallel 2
+
+      - name: Smoke test
+        run: cmake --build build --target run-pass
+
+      - name: Regression suite
+        shell: bash
+        run: |
+          set -euxo pipefail
+          plugin="$(find build -type f -name 'GlobalIVPass.so' -print -quit)"
+          test -n "$plugin"
+          python3 tests/run_regressions.py \
+            --plugin "$plugin" \
+            --llvm-root "$LLVM_ROOT" \
+            | tee /tmp/regressions.log
+          grep -Fx 'passed=29 failed=0 warnings=0' /tmp/regressions.log
+
+      - name: Formatting and static cleanup check
+        run: ./apply-format.sh --check --build-dir build
+
+      - name: Ensure checks did not modify tracked files
+        run: git diff --exit-code
