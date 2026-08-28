@@ -6,7 +6,6 @@
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Instructions.h"
 
-
 namespace global_iv {
     std::optional<LoopIterationPath> build_loop_iteration_path(const llvm::Loop &loop) {
         LoopIterationPath blocks;
