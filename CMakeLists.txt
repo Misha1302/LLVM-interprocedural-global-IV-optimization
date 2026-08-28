@@ -42,15 +42,36 @@ message(STATUS "LLVM tools dir: ${LLVM_TOOLS_BINARY_DIR}")
 # LLVM pass plugin
 # ============================================================================
 
+file(
+        GLOB_RECURSE
+        GLOBAL_IV_SOURCES
+        CONFIGURE_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
+)
+
+file(
+        GLOB_RECURSE
+        GLOBAL_IV_HEADERS
+        CONFIGURE_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/*.h"
+)
+
 add_llvm_pass_plugin(
         GlobalIVPass
-        src/GlobalIVPass.cpp
+        ${GLOBAL_IV_SOURCES}
+        ${GLOBAL_IV_HEADERS}
 )
 
 target_compile_features(
         GlobalIVPass
         PRIVATE
         cxx_std_23
+)
+
+target_include_directories(
+        GlobalIVPass
+        PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
 )
 
 target_include_directories(

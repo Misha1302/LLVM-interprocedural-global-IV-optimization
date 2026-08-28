@@ -16,12 +16,12 @@ Usage:
 
 Options:
   --project-root DIR   Project root (default: current directory).
-  --build-dir DIR     Use/generate compile_commands.json in this directory.
-  --style-only        Only style: not/and/or, braces and clang-format.
-                      Skip semantic const/const& changes.
-  --check             Verify only; do not modify files.
-  --keep-temp         Keep the temporary CMake directory for debugging.
-  -h, --help          Show this help.
+  --build-dir DIR      Use/generate compile_commands.json in this directory.
+  --style-only         Only style: not/and/or, braces and clang-format.
+                       Skip semantic const/const& changes.
+  --check              Verify only; do not modify files.
+  --keep-temp          Keep the temporary CMake directory for debugging.
+  -h, --help           Show this help.
 
 Environment overrides:
   CLANG_FORMAT=/path/to/clang-format
@@ -38,12 +38,18 @@ EOF
 while (($#)); do
     case "$1" in
         --project-root)
-            [[ $# -ge 2 ]] || { echo "Missing value for --project-root" >&2; exit 2; }
+            [[ $# -ge 2 ]] || {
+                echo "Missing value for --project-root" >&2
+                exit 2
+            }
             PROJECT_ROOT="$2"
             shift 2
             ;;
         --build-dir)
-            [[ $# -ge 2 ]] || { echo "Missing value for --build-dir" >&2; exit 2; }
+            [[ $# -ge 2 ]] || {
+                echo "Missing value for --build-dir" >&2
+                exit 2
+            }
             BUILD_DIR="$2"
             shift 2
             ;;
@@ -68,7 +74,7 @@ while (($#)); do
             TARGET_ARGS+=("$@")
             break
             ;;
-        -* )
+        -*)
             echo "Unknown option: $1" >&2
             usage >&2
             exit 2
@@ -82,8 +88,8 @@ done
 
 PROJECT_ROOT="$(cd -- "$PROJECT_ROOT" && pwd)"
 
-# Keep every generated helper outside the repository.
 RUNTIME_DIR="$(mktemp -d "${TMPDIR:-/tmp}/llvm-cpp-format.XXXXXX")"
+
 cleanup() {
     if [[ "$KEEP_TEMP" -eq 1 ]]; then
         echo "Temporary files kept at: $RUNTIME_DIR"
@@ -91,6 +97,7 @@ cleanup() {
         rm -rf -- "$RUNTIME_DIR"
     fi
 }
+
 trap cleanup EXIT
 
 FORMAT_CONFIG="$RUNTIME_DIR/clang-format.yaml"
@@ -102,9 +109,10 @@ BasedOnStyle: LLVM
 Language: Cpp
 Standard: Latest
 
-ColumnLimit: 121
+ColumnLimit: 120
 IndentWidth: 4
 ContinuationIndentWidth: 4
+BracedInitializerIndentWidth: 4
 TabWidth: 4
 UseTab: Never
 
@@ -126,13 +134,19 @@ PointerAlignment: Right
 ReferenceAlignment: Right
 QualifierAlignment: Left
 
+SpacesInAngles: Leave
+
 BreakBeforeBinaryOperators: All
 BreakBeforeTernaryOperators: true
+
 AlignAfterOpenBracket: false
 BreakAfterOpenBracketFunction: true
-# Keep calls in the existing style; declaration/definition closing parens are
-# normalized separately after clang-format.
 BreakBeforeCloseBracketFunction: false
+
+Cpp11BracedListStyle: FunctionCall
+BreakAfterOpenBracketBracedList: true
+BreakBeforeCloseBracketBracedList: true
+
 BreakAfterReturnType: Automatic
 PenaltyReturnTypeOnItsOwnLine: 1000000000
 PenaltyExcessCharacter: 10000000
@@ -195,10 +209,12 @@ resolve_tool() {
         else
             candidate="$explicit"
         fi
+
         [[ -n "$candidate" && -x "$candidate" ]] || {
             echo "$env_name is not executable: $explicit" >&2
             return 1
         }
+
         printf '%s\n' "$candidate"
         return 0
     fi
@@ -210,15 +226,19 @@ resolve_tool() {
         fi
     done
 
-    # Typical local LLVM installations used by this project, e.g.
-    # ~/bin/llvm-22.1.8/bin/clang-format.
     local matches=()
+
     shopt -s nullglob
     matches=("$HOME"/bin/llvm-22*/bin/"$base")
     shopt -u nullglob
+
     if ((${#matches[@]})); then
         candidate="$(printf '%s\n' "${matches[@]}" | sort -V | tail -n 1)"
-        [[ -x "$candidate" ]] && { printf '%s\n' "$candidate"; return 0; }
+
+        if [[ -x "$candidate" ]]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
     fi
 
     return 1
@@ -226,18 +246,17 @@ resolve_tool() {
 
 version_info() {
     local tool="$1"
-    local output major summary
+    local output
+    local major
+    local summary
+
     output="$("$tool" --version 2>&1)" || {
         echo "Cannot run: $tool --version" >&2
         return 1
     }
 
-    # Works with both:
-    #   clang-format version 22.1.8 (...)
-    # and:
-    #   LLVM (http://llvm.org/):
-    #     LLVM version 22.1.8
     major="$(sed -nE 's/.*[Vv]ersion[[:space:]]+([0-9]+)(\.[0-9]+)*.*/\1/p' <<<"$output" | head -n 1)"
+
     if [[ -z "$major" ]]; then
         major="$(grep -Eo '[0-9]+\.[0-9]+(\.[0-9]+)?' <<<"$output" | head -n 1 | cut -d. -f1 || true)"
     fi
@@ -247,6 +266,7 @@ version_info() {
         printf '%s\n' "$output" >&2
         return 1
     fi
+
     if ((major < MIN_LLVM_MAJOR)); then
         echo "Need LLVM/Clang >= $MIN_LLVM_MAJOR, got:" >&2
         printf '%s\n' "$output" >&2
@@ -254,7 +274,11 @@ version_info() {
     fi
 
     summary="$(grep -m1 -E '[Vv]ersion[[:space:]]+[0-9]+' <<<"$output" || true)"
-    [[ -n "$summary" ]] || summary="$(head -n 1 <<<"$output")"
+
+    if [[ -z "$summary" ]]; then
+        summary="$(head -n 1 <<<"$output")"
+    fi
+
     summary="$(sed -E 's/^[[:space:]]+//' <<<"$summary")"
     printf '%s\n' "$summary"
 }
@@ -264,27 +288,32 @@ CLANG_FORMAT_BIN="$(resolve_tool CLANG_FORMAT clang-format)" || {
     echo "Set CLANG_FORMAT=/path/to/clang-format." >&2
     exit 2
 }
+
 FORMAT_VERSION="$(version_info "$CLANG_FORMAT_BIN")" || exit 2
 echo "Using clang-format: $FORMAT_VERSION"
 
 CLANG_TIDY_BIN=""
+
 if [[ "$STYLE_ONLY" -eq 0 ]]; then
     CLANG_TIDY_BIN="$(resolve_tool CLANG_TIDY clang-tidy)" || {
         echo "clang-tidy $MIN_LLVM_MAJOR+ is required for const/const& fixes." >&2
         echo "Set CLANG_TIDY=/path/to/clang-tidy or use --style-only." >&2
         exit 2
     }
+
     TIDY_VERSION="$(version_info "$CLANG_TIDY_BIN")" || exit 2
     echo "Using clang-tidy:   $TIDY_VERSION"
 fi
 
 LLVM_CONFIG_BIN="$(resolve_tool LLVM_CONFIG llvm-config || true)"
+
 if [[ -n "$LLVM_CONFIG_BIN" ]]; then
     LLVM_CONFIG_VERSION="$(version_info "$LLVM_CONFIG_BIN")" || exit 2
     echo "Using llvm-config:  $LLVM_CONFIG_VERSION"
 fi
 
 CMAKE="${CMAKE_BIN:-}"
+
 if [[ -n "$CMAKE" ]]; then
     if [[ "$CMAKE" != */* ]]; then
         CMAKE="$(command -v -- "$CMAKE" 2>/dev/null || true)"
@@ -293,20 +322,35 @@ else
     CMAKE="$(command -v cmake 2>/dev/null || true)"
 fi
 
-# Validate the actual clang-format parser before touching user files.
-if ! "$CLANG_FORMAT_BIN" --style="file:$FORMAT_CONFIG" --dump-config >/dev/null 2>"$RUNTIME_DIR/format-config.err"; then
+if ! "$CLANG_FORMAT_BIN" \
+    --style="file:$FORMAT_CONFIG" \
+    --dump-config \
+    >/dev/null \
+    2>"$RUNTIME_DIR/format-config.err"; then
+
     echo "clang-format rejected the generated style configuration:" >&2
     cat "$RUNTIME_DIR/format-config.err" >&2
     exit 2
 fi
 
 if [[ -n "$CLANG_TIDY_BIN" ]]; then
-    if ! "$CLANG_TIDY_BIN" --config-file="$TIDY_STYLE_CONFIG" --list-checks >/dev/null 2>"$RUNTIME_DIR/tidy-style.err"; then
+    if ! "$CLANG_TIDY_BIN" \
+        --config-file="$TIDY_STYLE_CONFIG" \
+        --list-checks \
+        >/dev/null \
+        2>"$RUNTIME_DIR/tidy-style.err"; then
+
         echo "clang-tidy rejected the style checks configuration:" >&2
         cat "$RUNTIME_DIR/tidy-style.err" >&2
         exit 2
     fi
-    if ! "$CLANG_TIDY_BIN" --config-file="$TIDY_SEMANTIC_CONFIG" --list-checks >/dev/null 2>"$RUNTIME_DIR/tidy-semantic.err"; then
+
+    if ! "$CLANG_TIDY_BIN" \
+        --config-file="$TIDY_SEMANTIC_CONFIG" \
+        --list-checks \
+        >/dev/null \
+        2>"$RUNTIME_DIR/tidy-semantic.err"; then
+
         echo "clang-tidy rejected the const/const& configuration:" >&2
         cat "$RUNTIME_DIR/tidy-semantic.err" >&2
         exit 2
@@ -315,39 +359,66 @@ fi
 
 is_cpp_file() {
     case "$1" in
-        *.c|*.cc|*.cpp|*.cxx|*.h|*.hh|*.hpp|*.hxx|*.inc|*.ipp|*.tpp) return 0 ;;
-        *) return 1 ;;
+        *.c|*.cc|*.cpp|*.cxx|*.h|*.hh|*.hpp|*.hxx|*.inc|*.ipp|*.tpp)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
     esac
 }
 
 is_translation_unit() {
     case "$1" in
-        *.c|*.cc|*.cpp|*.cxx) return 0 ;;
-        *) return 1 ;;
+        *.c|*.cc|*.cpp|*.cxx)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
     esac
 }
 
 collect_from_dir() {
     local dir="$1"
+
     find "$dir" \
         \( -type d \( \
-            -name .git -o -name build -o -name 'build-*' -o -name 'cmake-build-*' -o \
-            -name _deps -o -name third_party -o -name vendor -o -name external -o \
-            -path '*/tests/last-output' \
+            -name .git \
+            -o -name build \
+            -o -name 'build-*' \
+            -o -name 'cmake-build-*' \
+            -o -name _deps \
+            -o -name third_party \
+            -o -name vendor \
+            -o -name external \
+            -o -path '*/tests/last-output' \
         \) -prune \) -o \
         \( -type f \( \
-            -name '*.c' -o -name '*.cc' -o -name '*.cpp' -o -name '*.cxx' -o \
-            -name '*.h' -o -name '*.hh' -o -name '*.hpp' -o -name '*.hxx' -o \
-            -name '*.inc' -o -name '*.ipp' -o -name '*.tpp' \
+            -name '*.c' \
+            -o -name '*.cc' \
+            -o -name '*.cpp' \
+            -o -name '*.cxx' \
+            -o -name '*.h' \
+            -o -name '*.hh' \
+            -o -name '*.hpp' \
+            -o -name '*.hxx' \
+            -o -name '*.inc' \
+            -o -name '*.ipp' \
+            -o -name '*.tpp' \
         \) -print0 \)
 }
 
 FILES=()
+
 if ((${#TARGET_ARGS[@]} == 0)); then
     if git -C "$PROJECT_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
         while IFS= read -r -d '' rel; do
             path="$PROJECT_ROOT/$rel"
-            [[ -f "$path" ]] && is_cpp_file "$path" && FILES+=("$path")
+
+            if [[ -f "$path" ]] && is_cpp_file "$path"; then
+                FILES+=("$path")
+            fi
         done < <(git -C "$PROJECT_ROOT" ls-files -z)
     else
         while IFS= read -r -d '' path; do
@@ -357,6 +428,7 @@ if ((${#TARGET_ARGS[@]} == 0)); then
 else
     for target in "${TARGET_ARGS[@]}"; do
         [[ "$target" = /* ]] || target="$PROJECT_ROOT/$target"
+
         if [[ -d "$target" ]]; then
             while IFS= read -r -d '' path; do
                 FILES+=("$path")
@@ -375,17 +447,21 @@ if ((${#FILES[@]} == 0)); then
 fi
 
 mapfile -d '' FILES < <(printf '%s\0' "${FILES[@]}" | sort -zu)
+
 TIDY_FILES=()
+
 for file in "${FILES[@]}"; do
-    is_translation_unit "$file" && TIDY_FILES+=("$file")
+    if is_translation_unit "$file"; then
+        TIDY_FILES+=("$file")
+    fi
 done
 
 echo "Files: ${#FILES[@]} (${#TIDY_FILES[@]} translation unit(s))"
 
-# Safe token rewrite/check. It ignores comments and all C++ string/char/raw literals.
 run_token_tool() {
     local mode="$1"
     shift
+
     python3 - "$mode" "$@" <<'PY'
 from __future__ import annotations
 
@@ -395,23 +471,30 @@ from pathlib import Path
 
 MODE = sys.argv[1]
 PATHS = [Path(p) for p in sys.argv[2:]]
-MAX_COLUMNS = 121
+MAX_COLUMNS = 120
 
 
 def raw_string_end(text: str, start: int) -> int | None:
     prefixes = ("u8R\"", "uR\"", "UR\"", "LR\"", "R\"")
     prefix = next((p for p in prefixes if text.startswith(p, start)), None)
+
     if prefix is None:
         return None
+
     delim_start = start + len(prefix)
     open_paren = text.find("(", delim_start, delim_start + 17)
+
     if open_paren == -1:
         return None
+
     delimiter = text[delim_start:open_paren]
+
     if any(ch in delimiter for ch in " \\\t\r\n()"):
         return None
+
     closing = ")" + delimiter + '"'
     end = text.find(closing, open_paren + 1)
+
     return len(text) if end == -1 else end + len(closing)
 
 
@@ -428,6 +511,7 @@ def transform(text: str, rewrite: bool) -> tuple[str, list[tuple[int, str]]]:
 
     while i < len(text):
         raw_end = raw_string_end(text, i)
+
         if raw_end is not None:
             copy(text[i:raw_end])
             i = raw_end
@@ -435,36 +519,45 @@ def transform(text: str, rewrite: bool) -> tuple[str, list[tuple[int, str]]]:
 
         if text.startswith("//", i):
             end = text.find("\n", i)
+
             if end == -1:
                 copy(text[i:])
                 break
+
             copy(text[i:end + 1])
             i = end + 1
             continue
 
         if text.startswith("/*", i):
             end = text.find("*/", i + 2)
+
             if end == -1:
                 copy(text[i:])
                 break
+
             end += 2
             copy(text[i:end])
             i = end
             continue
 
         ch = text[i]
+
         if ch in {'"', "'"}:
             quote = ch
             start = i
             i += 1
+
             while i < len(text):
                 if text[i] == "\\":
                     i += 2
                     continue
+
                 if i < len(text) and text[i] == quote:
                     i += 1
                     break
+
                 i += 1
+
             copy(text[start:i])
             continue
 
@@ -476,6 +569,7 @@ def transform(text: str, rewrite: bool) -> tuple[str, list[tuple[int, str]]]:
                 violations.append((line, "use 'and' instead of '&&'"))
             i += 2
             continue
+
         if text.startswith("||", i):
             if rewrite:
                 out.append(" or ")
@@ -484,6 +578,7 @@ def transform(text: str, rewrite: bool) -> tuple[str, list[tuple[int, str]]]:
                 violations.append((line, "use 'or' instead of '||'"))
             i += 2
             continue
+
         if ch == "!" and not text.startswith("!=", i):
             if rewrite:
                 out.append("not ")
@@ -494,15 +589,16 @@ def transform(text: str, rewrite: bool) -> tuple[str, list[tuple[int, str]]]:
             continue
 
         out.append(ch)
+
         if ch == "\n":
             line += 1
+
         i += 1
 
     return "".join(out), violations
 
 
 def code_only(text: str) -> str:
-    # Blank comments/literals while preserving newlines/columns.
     out: list[str] = []
     i = 0
 
@@ -511,58 +607,85 @@ def code_only(text: str) -> str:
 
     while i < len(text):
         raw_end = raw_string_end(text, i)
+
         if raw_end is not None:
             out.append(blank(text[i:raw_end]))
             i = raw_end
             continue
+
         if text.startswith("//", i):
             end = text.find("\n", i)
+
             if end == -1:
                 out.append(blank(text[i:]))
                 break
+
             out.append(blank(text[i:end]))
             out.append("\n")
             i = end + 1
             continue
+
         if text.startswith("/*", i):
             end = text.find("*/", i + 2)
+
             if end == -1:
                 out.append(blank(text[i:]))
                 break
+
             end += 2
             out.append(blank(text[i:end]))
             i = end
             continue
+
         if text[i] in {'"', "'"}:
             quote = text[i]
             start = i
             i += 1
+
             while i < len(text):
                 if text[i] == "\\":
                     i += 2
                     continue
+
                 if i < len(text) and text[i] == quote:
                     i += 1
                     break
+
                 i += 1
+
             out.append(blank(text[start:i]))
             continue
+
         out.append(text[i])
         i += 1
+
     return "".join(out)
 
 
-split_function_re = re.compile(r"^[ \t]*(?:~?[A-Za-z_]\w*::)*~?[A-Za-z_]\w*\s*\(")
-control_prefixes = ("if", "for", "while", "switch", "catch", "return", "sizeof", "alignof")
+split_function_re = re.compile(
+    r"^[ \t]*(?:~?[A-Za-z_]\w*::)*~?[A-Za-z_]\w*\s*\("
+)
+control_prefixes = (
+    "if",
+    "for",
+    "while",
+    "switch",
+    "catch",
+    "return",
+    "sizeof",
+    "alignof",
+)
 
 
 def split_return_type_violations(text: str) -> list[tuple[int, str]]:
     lines = text.splitlines()
     result: list[tuple[int, str]] = []
+
     for idx in range(1, len(lines)):
         current = lines[idx]
         previous = lines[idx - 1]
         stripped = current.lstrip()
+
         if not split_function_re.match(current):
             continue
         if stripped.startswith(control_prefixes):
@@ -573,14 +696,18 @@ def split_return_type_violations(text: str) -> list[tuple[int, str]]:
             continue
         if previous.lstrip().startswith(("//", "/*", "*", "#")):
             continue
+
         if re.search(r"(?:[A-Za-z_]\w*|[>*&]|const|volatile)\s*$", previous):
             result.append((idx + 1, stripped.split("(", 1)[0].strip()))
+
     return result
 
 
 failed = False
+
 for path in PATHS:
     text = path.read_text(encoding="utf-8")
+
     if MODE == "rewrite":
         new, _ = transform(text, True)
         if new != text:
@@ -588,21 +715,24 @@ for path in PATHS:
         continue
 
     if MODE == "check-rewrite":
-        new, violations = transform(text, False)
-        del new
+        _, violations = transform(text, False)
+
         for line_no, message in violations:
             print(f"{path}:{line_no}: {message}", file=sys.stderr)
             failed = True
+
         continue
 
     if MODE == "verify":
         _, violations = transform(text, False)
+
         for line_no, message in violations:
             print(f"{path}:{line_no}: {message}", file=sys.stderr)
             failed = True
 
         for line_no, line in enumerate(text.splitlines(), 1):
             columns = len(line.expandtabs(4))
+
             if columns > MAX_COLUMNS:
                 print(
                     f"{path}:{line_no}: line is {columns} columns; max is {MAX_COLUMNS}",
@@ -616,6 +746,7 @@ for path in PATHS:
                 file=sys.stderr,
             )
             failed = True
+
         continue
 
     raise SystemExit(f"unknown mode: {MODE}")
@@ -624,12 +755,10 @@ raise SystemExit(1 if failed else 0)
 PY
 }
 
-# clang-format 22 can put the closing ')' of a multiline function signature on
-# its own line, but BreakBeforeCloseBracketFunction also changes function calls.
-# Preserve the current call style and normalize declarations/definitions only.
 run_signature_tool() {
     local mode="$1"
     shift
+
     python3 - "$mode" "$@" <<'PY'
 from __future__ import annotations
 
@@ -641,8 +770,21 @@ MODE = sys.argv[1]
 PATHS = [Path(p) for p in sys.argv[2:]]
 
 CONTROL_PREFIXES = (
-    "if ", "if(", "for ", "for(", "while ", "while(", "switch ", "switch(",
-    "catch ", "catch(", "return ", "co_return ", "sizeof", "alignof", "static_assert",
+    "if ",
+    "if(",
+    "for ",
+    "for(",
+    "while ",
+    "while(",
+    "switch ",
+    "switch(",
+    "catch ",
+    "catch(",
+    "return ",
+    "co_return ",
+    "sizeof",
+    "alignof",
+    "static_assert",
 )
 
 SIGNATURE_START_RE = re.compile(
@@ -654,15 +796,18 @@ SIGNATURE_START_RE = re.compile(
 
 
 def is_signature_start(line: str) -> tuple[bool, str]:
-    m = SIGNATURE_START_RE.match(line)
-    if not m:
+    match = SIGNATURE_START_RE.match(line)
+
+    if not match:
         return False, ""
 
     stripped = line.strip()
+
     if stripped.startswith(CONTROL_PREFIXES):
         return False, ""
 
-    body = m.group("body").strip()
+    body = match.group("body").strip()
+
     if not body:
         return False, ""
 
@@ -672,7 +817,7 @@ def is_signature_start(line: str) -> tuple[bool, str]:
     if stripped.startswith("#"):
         return False, ""
 
-    return True, m.group("indent")
+    return True, match.group("indent")
 
 
 def find_matching_paren(text: str, open_pos: int) -> int | None:
@@ -698,33 +843,43 @@ def find_matching_paren(text: str, open_pos: int) -> int | None:
 
         if state in {"string", "char"}:
             quote = '"' if state == "string" else "'"
+
             if text[i] == "\\":
                 i += 2
                 continue
+
             if text[i] == quote:
                 state = "code"
+
             i += 1
             continue
 
         if state == "raw":
             closing = ")" + raw_delim + '"'
+
             if text.startswith(closing, i):
                 state = "code"
                 i += len(closing)
             else:
                 i += 1
+
             continue
 
         if text.startswith("//", i):
             state = "line_comment"
             i += 2
             continue
+
         if text.startswith("/*", i):
             state = "block_comment"
             i += 2
             continue
 
-        raw_match = re.match(r'(?:u8|u|U|L)?R"([^ ()\\\t\r\n]{0,16})\(', text[i:])
+        raw_match = re.match(
+            r'(?:u8|u|U|L)?R"([^ ()\\\t\r\n]{0,16})\(',
+            text[i:],
+        )
+
         if raw_match:
             raw_delim = raw_match.group(1)
             state = "raw"
@@ -735,6 +890,7 @@ def find_matching_paren(text: str, open_pos: int) -> int | None:
             state = "string"
             i += 1
             continue
+
         if text[i] == "'":
             state = "char"
             i += 1
@@ -744,8 +900,10 @@ def find_matching_paren(text: str, open_pos: int) -> int | None:
             depth += 1
         elif text[i] == ")":
             depth -= 1
+
             if depth == 0:
                 return i
+
         i += 1
 
     return None
@@ -754,21 +912,27 @@ def find_matching_paren(text: str, open_pos: int) -> int | None:
 def signature_ranges(text: str):
     lines = text.splitlines(keepends=True)
     offset = 0
+
     for line_no, line_with_nl in enumerate(lines, 1):
         line = line_with_nl.rstrip("\r\n")
-        is_sig, indent = is_signature_start(line)
-        if is_sig:
+        is_signature, indent = is_signature_start(line)
+
+        if is_signature:
             open_in_line = line.rfind("(")
+
             if open_in_line >= 0:
                 open_pos = offset + open_in_line
                 close_pos = find_matching_paren(text, open_pos)
+
                 if close_pos is not None:
                     yield line_no, open_pos, close_pos, indent
+
         offset += len(line_with_nl)
 
 
 def normalize(text: str) -> str:
     edits: list[tuple[int, int, str]] = []
+
     for _, open_pos, close_pos, indent in signature_ranges(text):
         if "\n" not in text[open_pos:close_pos]:
             continue
@@ -787,16 +951,20 @@ def normalize(text: str) -> str:
 
     for start, end, replacement in reversed(edits):
         text = text[:start] + replacement + text[end:]
+
     return text
 
 
 def verify(text: str, path: Path) -> bool:
     ok = True
+
     for _, open_pos, close_pos, indent in signature_ranges(text):
         if "\n" not in text[open_pos:close_pos]:
             continue
+
         line_start = text.rfind("\n", 0, close_pos) + 1
         before_close = text[line_start:close_pos]
+
         if before_close != indent:
             close_line = text.count("\n", 0, close_pos) + 1
             print(
@@ -805,12 +973,15 @@ def verify(text: str, path: Path) -> bool:
                 file=sys.stderr,
             )
             ok = False
+
     return ok
 
 
 failed = False
+
 for path in PATHS:
     text = path.read_text(encoding="utf-8")
+
     if MODE == "normalize":
         new_text = normalize(text)
         if new_text != text:
@@ -824,22 +995,234 @@ raise SystemExit(1 if failed else 0)
 PY
 }
 
+run_assignment_tool() {
+    local mode="$1"
+    shift
+
+    python3 - "$mode" "$@" <<'PY'
+from __future__ import annotations
+
+import re
+import sys
+from pathlib import Path
+
+MODE = sys.argv[1]
+PATHS = [Path(p) for p in sys.argv[2:]]
+
+EXTRA_INDENT = 8
+ASSIGNMENT_RE = re.compile(r"^(?P<indent>[ \t]*)=(?!=)")
+
+
+def raw_string_end(text: str, start: int) -> int | None:
+    prefixes = ("u8R\"", "uR\"", "UR\"", "LR\"", "R\"")
+    prefix = next((p for p in prefixes if text.startswith(p, start)), None)
+
+    if prefix is None:
+        return None
+
+    delim_start = start + len(prefix)
+    open_paren = text.find("(", delim_start, delim_start + 17)
+
+    if open_paren == -1:
+        return None
+
+    delimiter = text[delim_start:open_paren]
+
+    if any(ch in delimiter for ch in " \\\t\r\n()"):
+        return None
+
+    closing = ")" + delimiter + '"'
+    end = text.find(closing, open_paren + 1)
+
+    return len(text) if end == -1 else end + len(closing)
+
+
+def code_only(text: str) -> str:
+    out: list[str] = []
+    i = 0
+
+    def blank(fragment: str) -> str:
+        return "".join("\n" if char == "\n" else " " for char in fragment)
+
+    while i < len(text):
+        raw_end = raw_string_end(text, i)
+
+        if raw_end is not None:
+            out.append(blank(text[i:raw_end]))
+            i = raw_end
+            continue
+
+        if text.startswith("//", i):
+            end = text.find("\n", i)
+
+            if end == -1:
+                out.append(blank(text[i:]))
+                break
+
+            out.append(blank(text[i:end]))
+            out.append("\n")
+            i = end + 1
+            continue
+
+        if text.startswith("/*", i):
+            end = text.find("*/", i + 2)
+
+            if end == -1:
+                out.append(blank(text[i:]))
+                break
+
+            end += 2
+            out.append(blank(text[i:end]))
+            i = end
+            continue
+
+        if text[i] in {'"', "'"}:
+            quote = text[i]
+            start = i
+            i += 1
+
+            while i < len(text):
+                if text[i] == "\\":
+                    i += 2
+                    continue
+
+                if i < len(text) and text[i] == quote:
+                    i += 1
+                    break
+
+                i += 1
+
+            out.append(blank(text[start:i]))
+            continue
+
+        out.append(text[i])
+        i += 1
+
+    return "".join(out)
+
+
+def line_ending(line: str) -> str:
+    if line.endswith("\r\n"):
+        return "\r\n"
+    if line.endswith("\n"):
+        return "\n"
+    return ""
+
+
+def leading_whitespace(line: str) -> str:
+    return line[:len(line) - len(line.lstrip(" \t"))]
+
+
+def is_alias_declaration(line: str) -> bool:
+    return line.lstrip().startswith("using ")
+
+
+def normalize(text: str) -> str:
+    lines = text.splitlines(keepends=True)
+    code_lines = code_only(text).splitlines(keepends=True)
+
+    for index in range(1, min(len(lines), len(code_lines))):
+        code_line = code_lines[index].rstrip("\r\n")
+
+        if not ASSIGNMENT_RE.match(code_line):
+            continue
+
+        previous_code = code_lines[index - 1].rstrip("\r\n")
+
+        if not previous_code.strip() or is_alias_declaration(previous_code):
+            continue
+
+        previous_line = lines[index - 1].rstrip("\r\n")
+        current_line = lines[index].rstrip("\r\n")
+
+        indent = leading_whitespace(previous_line) + " " * EXTRA_INDENT
+        body = current_line.lstrip(" \t")
+        lines[index] = indent + body + line_ending(lines[index])
+
+    return "".join(lines)
+
+
+def verify(text: str, path: Path) -> bool:
+    lines = text.splitlines()
+    code_lines = code_only(text).splitlines()
+    ok = True
+
+    for index in range(1, min(len(lines), len(code_lines))):
+        if not ASSIGNMENT_RE.match(code_lines[index]):
+            continue
+
+        previous_code = code_lines[index - 1]
+
+        if not previous_code.strip() or is_alias_declaration(previous_code):
+            continue
+
+        previous_indent = len(leading_whitespace(lines[index - 1]).expandtabs(4))
+        actual_indent = len(leading_whitespace(lines[index]).expandtabs(4))
+        expected_indent = previous_indent + EXTRA_INDENT
+
+        if actual_indent != expected_indent:
+            print(
+                f"{path}:{index + 1}: wrapped assignment '=' must be "
+                f"{expected_indent} columns indented, got {actual_indent}",
+                file=sys.stderr,
+            )
+            ok = False
+
+    return ok
+
+
+failed = False
+
+for path in PATHS:
+    text = path.read_text(encoding="utf-8")
+
+    if MODE == "normalize":
+        new_text = normalize(text)
+        if new_text != text:
+            path.write_text(new_text, encoding="utf-8")
+    elif MODE == "verify":
+        failed = not verify(text, path) or failed
+    else:
+        raise SystemExit(f"unknown assignment mode: {MODE}")
+
+raise SystemExit(1 if failed else 0)
+PY
+}
+
 check_composite_format() {
     local failed=0
     local i=0
-    local file tmp
+    local file
+    local tmp
+
     mkdir -p -- "$RUNTIME_DIR/format-check"
 
     for file in "${FILES[@]}"; do
         i=$((i + 1))
         tmp="$RUNTIME_DIR/format-check/${i}-$(basename -- "$file")"
+
         cp -- "$file" "$tmp"
-        "$CLANG_FORMAT_BIN" -i --style="file:$FORMAT_CONFIG" "$tmp"
+
+        "$CLANG_FORMAT_BIN" \
+            -i \
+            --style="file:$FORMAT_CONFIG" \
+            "$tmp"
+
+        run_assignment_tool normalize "$tmp"
         run_signature_tool normalize "$tmp"
 
         if ! cmp -s -- "$file" "$tmp"; then
             echo "Formatting differs: $file" >&2
-            diff -u --label "$file" --label "$file (formatted)" "$file" "$tmp" >&2 || true
+
+            diff \
+                -u \
+                --label "$file" \
+                --label "$file (formatted)" \
+                "$file" \
+                "$tmp" \
+                >&2 \
+                || true
+
             failed=1
         fi
     done
@@ -847,19 +1230,23 @@ check_composite_format() {
     return "$failed"
 }
 
-# Compilation database is only needed for semantic const/const& work.
 ensure_compile_db() {
     local requested="$BUILD_DIR"
-    local candidate db auto_dir
+    local candidate
+    local db
+    local auto_dir
 
     if [[ -n "$requested" ]]; then
         [[ "$requested" = /* ]] || requested="$PROJECT_ROOT/$requested"
+
         mkdir -p -- "$requested"
         requested="$(cd -- "$requested" && pwd)"
+
         if [[ -f "$requested/compile_commands.json" ]]; then
             BUILD_DIR="$requested"
             return 0
         fi
+
         candidate="$requested"
     else
         for candidate in \
@@ -867,20 +1254,30 @@ ensure_compile_db() {
             "$PROJECT_ROOT/build" \
             "$PROJECT_ROOT/cmake-build-debug" \
             "$PROJECT_ROOT/cmake-build-release"; do
+
             if [[ -f "$candidate/compile_commands.json" ]]; then
                 BUILD_DIR="$candidate"
                 return 0
             fi
         done
 
-        db="$(find "$PROJECT_ROOT" -maxdepth 3 -type f -name compile_commands.json \
-            -not -path '*/.git/*' -print -quit 2>/dev/null || true)"
+        db="$(
+            find "$PROJECT_ROOT" \
+                -maxdepth 3 \
+                -type f \
+                -name compile_commands.json \
+                -not -path '*/.git/*' \
+                -print \
+                -quit \
+                2>/dev/null \
+                || true
+        )"
+
         if [[ -n "$db" ]]; then
             BUILD_DIR="$(dirname -- "$db")"
             return 0
         fi
 
-        # Do not mutate an existing build tree merely for formatting.
         auto_dir="$RUNTIME_DIR/cmake-build"
         mkdir -p -- "$auto_dir"
         candidate="$auto_dir"
@@ -890,6 +1287,7 @@ ensure_compile_db() {
         echo "No compile_commands.json and no CMakeLists.txt at $PROJECT_ROOT" >&2
         return 1
     }
+
     [[ -n "$CMAKE" && -x "$CMAKE" ]] || {
         echo "No compile_commands.json and cmake is not available." >&2
         return 1
@@ -897,21 +1295,31 @@ ensure_compile_db() {
 
     echo "No compile_commands.json found; generating a temporary one..."
 
-    # Make the same LLVM installation visible to CMake. This repository's
-    # CMakeLists.txt resolves LLVM through llvm-config.
     local cmake_path="$PATH"
     local tool_dir
-    for tool_dir in "$(dirname -- "$CLANG_FORMAT_BIN")" "$(dirname -- "$CLANG_TIDY_BIN")"; do
+
+    for tool_dir in \
+        "$(dirname -- "$CLANG_FORMAT_BIN")" \
+        "$(dirname -- "$CLANG_TIDY_BIN")"; do
+
         case ":$cmake_path:" in
-            *":$tool_dir:"*) ;;
-            *) cmake_path="$tool_dir:$cmake_path" ;;
+            *":$tool_dir:"*)
+                ;;
+            *)
+                cmake_path="$tool_dir:$cmake_path"
+                ;;
         esac
     done
+
     if [[ -n "$LLVM_CONFIG_BIN" ]]; then
         tool_dir="$(dirname -- "$LLVM_CONFIG_BIN")"
+
         case ":$cmake_path:" in
-            *":$tool_dir:"*) ;;
-            *) cmake_path="$tool_dir:$cmake_path" ;;
+            *":$tool_dir:"*)
+                ;;
+            *)
+                cmake_path="$tool_dir:$cmake_path"
+                ;;
         esac
     fi
 
@@ -921,9 +1329,9 @@ ensure_compile_db() {
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
     )
 
-    # The current project defines LLVM_CONFIG as a CMake cache variable via
-    # find_program(), so pin the same verified installation when available.
-    if [[ -n "$LLVM_CONFIG_BIN" ]] && grep -q 'LLVM_CONFIG' "$PROJECT_ROOT/CMakeLists.txt"; then
+    if [[ -n "$LLVM_CONFIG_BIN" ]] \
+        && grep -q 'LLVM_CONFIG' "$PROJECT_ROOT/CMakeLists.txt"; then
+
         cmake_args+=("-DLLVM_CONFIG=$LLVM_CONFIG_BIN")
     fi
 
@@ -947,19 +1355,30 @@ if [[ "$STYLE_ONLY" -eq 0 ]]; then
         echo "Use --style-only when formatting header-only input." >&2
         exit 2
     }
+
     ensure_compile_db || exit 2
 fi
 
 run_tidy() {
     local config="$1"
     local fix="$2"
+
     shift 2
-    local args=(--config-file="$config" -p "$BUILD_DIR")
+
+    local args=(
+        --config-file="$config"
+        -p "$BUILD_DIR"
+    )
+
     if [[ "$fix" -eq 1 ]]; then
-        args+=(--fix --format-style=none)
+        args+=(
+            --fix
+            --format-style=none
+        )
     else
         args+=(--warnings-as-errors='*')
     fi
+
     "$CLANG_TIDY_BIN" "${args[@]}" "$@"
 }
 
@@ -967,7 +1386,7 @@ if [[ "$CHECK_ONLY" -eq 1 ]]; then
     echo "Checking logical operators..."
     run_token_tool check-rewrite "${FILES[@]}"
 
-    echo "Checking clang-format + multiline function signatures..."
+    echo "Checking clang-format + project postprocessing..."
     check_composite_format
 
     if [[ "$STYLE_ONLY" -eq 0 ]]; then
@@ -978,11 +1397,15 @@ if [[ "$CHECK_ONLY" -eq 1 ]]; then
         run_tidy "$TIDY_SEMANTIC_CONFIG" 0 "${TIDY_FILES[@]}"
     fi
 
+    echo "Checking wrapped assignment indentation..."
+    run_assignment_tool verify "${FILES[@]}"
+
     echo "Checking multiline function signature closing parens..."
     run_signature_tool verify "${FILES[@]}"
 
-    echo "Checking hard invariants (121 columns and return-type/function-name)..."
+    echo "Checking hard invariants (120 columns and return-type/function-name)..."
     run_token_tool verify "${FILES[@]}"
+
     echo "All checks passed."
     exit 0
 fi
@@ -999,16 +1422,25 @@ if [[ "$STYLE_ONLY" -eq 0 ]]; then
 fi
 
 echo "Applying clang-format..."
-"$CLANG_FORMAT_BIN" -i --style="file:$FORMAT_CONFIG" "${FILES[@]}"
+
+"$CLANG_FORMAT_BIN" \
+    -i \
+    --style="file:$FORMAT_CONFIG" \
+    "${FILES[@]}"
+
+echo "Normalizing wrapped assignments..."
+run_assignment_tool normalize "${FILES[@]}"
 
 echo "Normalizing multiline function signatures..."
 run_signature_tool normalize "${FILES[@]}"
 
-# Validate the result, not merely tool exit status.
 if [[ "$STYLE_ONLY" -eq 0 ]]; then
     echo "Verifying braces and operator representation..."
     run_tidy "$TIDY_STYLE_CONFIG" 0 "${TIDY_FILES[@]}"
 fi
+
+echo "Verifying wrapped assignments..."
+run_assignment_tool verify "${FILES[@]}"
 
 echo "Verifying multiline function signatures..."
 run_signature_tool verify "${FILES[@]}"
